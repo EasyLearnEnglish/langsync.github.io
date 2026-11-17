@@ -1,23 +1,33 @@
 import { YoutubeTranscript } from 'youtube-transcript';
 
-export default async function handler(req, res) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-    if (req.method === 'OPTIONS') {
-        return res.status(200).end();
+export async function handler(event, context) {
+    // Handle CORS preflight
+    if (event.httpMethod === 'OPTIONS') {
+        return {
+            statusCode: 200,
+            headers: {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET, OPTIONS',
+                'Access-Control-Allow-Headers': 'Content-Type'
+            },
+            body: ''
+        };
     }
 
-    const { videoId, lang = 'en' } = req.query;
+    const videoId = event.queryStringParameters?.videoId;
+    const lang = event.queryStringParameters?.lang || 'en';
 
     if (!videoId) {
-        return res.status(400).json({ error: 'Missing required parameter: videoId' });
+        return {
+            statusCode: 400,
+            headers: { 'Access-Control-Allow-Origin': '*' },
+            body: JSON.stringify({ error: 'Missing required parameter: videoId' })
+        };
     }
 
     try {
         const transcript = await YoutubeTranscript.fetchTranscript(videoId, { lang });
-
+        
         const formattedSubtitles = transcript.map(item => {
             const startSec = item.offset / 1000;
             const durSec = item.duration / 1000;
@@ -28,8 +38,19 @@ export default async function handler(req, res) {
             };
         });
 
-        return res.status(200).json(formattedSubtitles);
+        return {
+            statusCode: 200,
+            headers: { 
+                'Access-Control-Allow-Origin': '*',
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(formattedSubtitles)
+        };
     } catch (error) {
-        return res.status(404).json({ error: 'Subtitles unavailable for this YouTube video ID' });
+        return {
+            statusCode: 404,
+            headers: { 'Access-Control-Allow-Origin': '*' },
+            body: JSON.stringify({ error: 'Subtitles unavailable for this YouTube video ID' })
+        };
     }
 }
