@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LingoSync — Interactive Video & Article Language Reader</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom scrollbar for smooth subtitle tracking */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #f1f5f9;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+        .vocab-token {
+            cursor: pointer;
+            border-radius: 3px;
+            padding: 1px 2px;
+            transition: background-color 0.15s ease, color 0.15s ease;
+        }
+        .vocab-token:hover {
+            background-color: #dbeafe;
+            color: #1d4ed8;
+            text-decoration: underline;
+        }
+        .subtitle-active {
+            background-color: #eff6ff;
+            border-left: 4px solid #2563eb;
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 font-sans min-h-screen flex flex-col">
+
+    <!-- Top Navigation Bar -->
+    <header class="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+            <div class="flex items-center gap-2">
+                <div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold text-lg">L</div>
+                <span class="font-bold text-xl tracking-tight text-slate-900">LingoSync</span>
+            </div>
+            <nav class="flex gap-2 sm:gap-4">
+                <button onclick="switchTab('workspace')" id="nav-workspace" class="px-3 py-2 rounded-md text-sm font-medium bg-blue-50 text-blue-700 transition">
+                    Workspace
+                </button>
+                <button onclick="switchTab('library')" id="nav-library" class="px-3 py-2 rounded-md text-sm font-medium text-slate-600 hover:bg-slate-100 transition">
+                    Saved Media (<span id="saved-count">0</span>)
+                </button>
+                <button onclick="switchTab('vocab')" id="nav-vocab" class="px-3 py-2 rounded-md text-sm font-medium text-slate-600 hover:bg-slate-100 transition">
+                    Vocab List (<span id="vocab-count">0</span>)
+                </button>
+            </nav>
+        </div>
+    </header>
+
+    <!-- Main Application Container -->
+    <main class="flex-grow max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+
+        <!-- TAB 1: WORKSPACE (Media Loader & Interactive Reader/Player) -->
+        <section id="tab-workspace" class="space-y-6">
+            
+            <!-- Media Import Controls -->
+            <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+                <div class="flex flex-wrap gap-3 mb-4 border-b border-slate-100 pb-3">
+                    <button onclick="setInputMode('video')" id="mode-video-btn" class="px-4 py-1.5 rounded-full text-sm font-semibold bg-blue-600 text-white">
+                        YouTube Video
+                    </button>
+                    <button onclick="setInputMode('article')" id="mode-article-btn" class="px-4 py-1.5 rounded-full text-sm font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200">
+                        Article / Text
+                    </button>
+                    <div class="ml-auto flex items-center gap-2">
+                        <label for="target-lang" class="text-xs font-medium text-slate-500">Dictionary Pair:</label>
+                        <select id="target-lang" class="text-xs border border-slate-300 rounded-md px-2 py-1 bg-white">
+                            <option value="enfr">English → French</option>
+                            <option value="fren">French → English</option>
+                            <option value="enes">English → Spanish</option>
+                            <option value="esen">Spanish → English</option>
+                            <option value="ende">English → German</option>
+                            <option value="deen">German → English</option>
+                            <option value="enit">English → Italian</option>
+                            <option value="iten">Italian → English</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Video Input Form -->
+                <div id="input-video-panel" class="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
+                    <div class="md:col-span-5">
+                        <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">YouTube URL</label>
+                        <input type="text" id="video-url-input" placeholder="https://www.youtube.com/watch?v=..." class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+                    </div>
+                    <div class="md:col-span-3">
+                        <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Title (Optional)</label>
+                        <input type="text" id="video-title-input" placeholder="e.g., French News Clip" class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+                    </div>
+                    <div class="md:col-span-2">
+                        <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Video Lang Code</label>
+                        <input type="text" id="video-lang-input" value="en" placeholder="en, fr, es..." class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+                    </div>
+                    <div class="md:col-span-2 flex gap-2">
+                        <button onclick="handleLoadVideo()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg text-sm transition">
+                            Load
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Article Input Form -->
+                <div id="input-article-panel" class="hidden space-y-3">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div>
+                            <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Article Title</label>
+                            <input type="text" id="article-title-input" placeholder="Enter article title..." class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Source URL (Optional)</label>
+                            <input type="text" id="article-url-input" placeholder="https://..." class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Article Content</label>
+                        <textarea id="article-body-input" rows="4" placeholder="Paste the full text of the article here..." class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"></textarea>
+                    </div>
+                    <div class="flex justify-end">
+                        <button onclick="handleLoadArticle()" class="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-lg text-sm transition">
+                            Load Article
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Status / Fallback Alert Banner -->
+            <div id="status-banner" class="hidden p-4 rounded-xl border text-sm flex items-center justify-between">
+                <span id="status-message"></span>
+                <div id="whisper-upload-wrapper" class="hidden flex items-center gap-2">
+                    <label class="bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition">
+                        Upload Audio/Video for Whisper AI
+                        <input type="file" id="whisper-audio-input" accept="audio/*,video/*" class="hidden" onchange="handleWhisperFallback(event)">
+                    </label>
+                </div>
+            </div>
+
+            <!-- Active Viewer Area -->
+            <div id="viewer-container" class="hidden bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                        <span id="viewer-badge" class="text-xs font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-blue-100 text-blue-800 mr-2">VIDEO</span>
+                        <h2 id="viewer-title" class="inline font-bold text-lg text-slate-900">Untitled Media</h2>
+                    </div>
+                    <button onclick="saveCurrentMedia()" id="save-media-btn" class="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg transition">
+                        Save to Library
+                    </button>
+                </div>
+
+                <!-- Video Split View -->
+                <div id="video-workspace" class="hidden grid grid-cols-1 lg:grid-cols-12">
+                    <div class="lg:col-span-7 bg-black flex items-center justify-center aspect-video">
+                        <div id="youtube-player" class="w-full h-full"></div>
+                    </div>
+                    <div class="lg:col-span-5 flex flex-col h-[420px] lg:h-auto max-h-[500px] border-t lg:border-t-0 lg:border-l border-slate-200">
+                        <div class="p-3 bg-slate-100 border-b border-slate-200 flex items-center justify-between text-xs text-slate-600">
+                            <span>Click any word to look up or save</span>
+                            <label class="flex items-center gap-1.5 cursor-pointer">
+                                <input type="checkbox" id="auto-scroll-toggle" checked class="rounded text-blue-600">
+                                <span>Auto-scroll</span>
+                            </label>
+                        </div>
+                        <div id="subtitle-box" class="flex-grow overflow-y-auto p-4 space-y-2 text-base leading-relaxed">
+                            <!-- Synchronized subtitles populate here -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Article Reader View -->
+                <div id="article-workspace" class="hidden p-6 sm:p-10 max-w-3xl mx-auto">
+                    <p class="text-xs text-slate-400 mb-6">Tip: Click any word or highlight a phrase to look it up on WordReference, search Google, or add it to your CSV vocabulary list.</p>
+                    <div id="article-reader-content" class="space-y-4 text-lg leading-8 text-slate-800">
+                        <!-- Interactive tokenized paragraphs populate here -->
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- TAB 2: SAVED MEDIA LIBRARY -->
+        <section id="tab-library" class="hidden space-y-4">
+            <div class="flex items-center justify-between">
+                <h2 class="text-xl font-bold text-slate-900">Saved Videos & Articles</h2>
+            </div>
+            <div id="saved-media-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                <!-- Saved cards populate here -->
+            </div>
+        </section>
+
+        <!-- TAB 3: VOCABULARY LIST & CSV EXPORT -->
+        <section id="tab-vocab" class="hidden space-y-4">
+            <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center justify-between gap-4">
+                <div>
+                    <h2 class="text-xl font-bold text-slate-900">Saved Vocabulary</h2>
+                    <p class="text-sm text-slate-500">Export your list as a two-column CSV file (Vocab, WordReference Definition).</p>
+                </div>
+                <div class="flex gap-2">
+                    <button onclick="clearVocabList()" class="px-4 py-2 border border-red-200 text-red-600 hover:bg-red-50 rounded-lg text-sm font-medium transition">
+                        Clear All
+                    </button>
+                    <button onclick="exportVocabCSV()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition">
+                        Download .CSV
+                    </button>
+                </div>
+            </div>
+
+            <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                <table class="min-w-full divide-y divide-slate-200">
+                    <thead class="bg-slate-50">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">New Vocab</th>
+                            <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">WordReference Definition / Notes</th>
+                            <th class="px-6 py-3 text-right text-xs font-bold text-slate-500 uppercase tracking-wider">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="vocab-table-body" class="bg-white divide-y divide-slate-200 text-sm">
+                        <!-- Vocab rows populate here -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Floating Action Context Menu for Clicked Words / Selected Phrases -->
+    <div id="vocab-popover" class="hidden fixed z-50 bg-white rounded-xl shadow-xl border border-slate-200 w-72 p-4 space-y-3">
+        <div class="flex items-center justify-between border-b border-slate-100 pb-2">
+            <span id="popover-word" class="font-bold text-base text-blue-700 truncate">word</span>
+            <button onclick="closePopover()" class="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+        </div>
+        
+        <div class="space-y-1.5 text-sm">
+            <a id="link-wordreference" href="#" target="_blank" rel="noopener noreferrer" class="flex items-center justify-between w-full px-3 py-2 rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 font-medium transition">
+                <span>Open in WordReference</span>
+                <span>↗</span>
+            </a>
+            <a id="link-google-search" href="#" target="_blank" rel="noopener noreferrer" class="flex items-center justify-between w-full px-3 py-2 rounded-lg hover:bg-slate-100 text-slate-700 transition">
+                <span>Search in Browser</span>
+                <span>↗</span>
+            </a>
+            <a id="link-google-images" href="#" target="_blank" rel="noopener noreferrer" class="flex items-center justify-between w-full px-3 py-2 rounded-lg hover:bg-slate-100 text-slate-700 transition">
+                <span>Search Images</span>
+                <span>↗</span>
+            </a>
+        </div>
+
+        <div class="pt-2 border-t border-slate-100 space-y-2">
+            <label class="block text-xs font-semibold text-slate-500">Definition (from WordReference):</label>
+            <input type="text" id="popover-definition-input" placeholder="Paste or type definition..." class="w-full px-2.5 py-1.5 border border-slate-300 rounded-md text-xs focus:ring-2 focus:ring-blue-500 outline-none">
+            <button onclick="saveVocabFromPopover()" class="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold transition">
+                + Add to Vocab List
+            </button>
+        </div>
+    </div>
+
+    <!-- YouTube IFrame API -->
+    <script src="https://www.youtube.com/iframe_api"></script>
+
+    <!-- Application Logic & Transformers.js Whisper Fallback -->
+    <script type="module">
+        import { pipeline } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+
+        // ==========================================
+        // CONFIGURATION
+        // ==========================================
+        // Replace with your deployed Vercel or Netlify serverless endpoint URL
+        const SERVERLESS_API_URL = "https://your-lingosync-api.vercel.app/api/transcript";
+
+        // ==========================================
+        // APPLICATION STATE
+        // ==========================================
+        let ytPlayer = null;
+        let syncInterval = null;
+        let currentSubtitles = [];
+        let currentMedia = null;
+        let selectedVocabTerm = "";
+        let whisperTranscriber = null;
+
+        let savedMedia = JSON.parse(localStorage.getItem('lingosync_media') || '[]');
+        let vocabList = JSON.parse(localStorage.getItem('lingosync_vocab') || '[]');
+
+        // Initialize UI counts
+        updateCounters();
+        renderSavedMedia();
+        renderVocabTable();
+
+        // ==========================================
+        // NAVIGATION & UI TABS
+        // ==========================================
+        window.switchTab = function(tabName) {
+            ['workspace', 'library', 'vocab'].forEach(t => {
+                document.getElementById(`tab-${t}`).classList.add('hidden');
+                const btn = document.getElementById(`nav-${t}`);
+                btn.classList.remove('bg-blue-50', 'text-blue-700');
+                btn.classList.add('text-slate-600');
+            });
+            document.getElementById(`tab-${tabName}`).classList.remove('hidden');
+            const activeBtn = document.getElementById(`nav-${tabName}`);
+            activeBtn.classList.add('bg-blue-50', 'text-blue-700');
+            activeBtn.classList.remove('text-slate-600');
+            closePopover();
+        };
+
+        window.setInputMode = function(mode) {
+            const videoBtn = document.getElementById('mode-video-btn');
+            const articleBtn = document.getElementById('mode-article-btn');
+            const videoPanel = document.getElementById('input-video-panel');
+            const articlePanel = document.getElementById('input-article-panel');
+
+            if (mode === 'video') {
+                videoBtn.className = "px-4 py-1.5 rounded-full text-sm font-semibold bg-blue-600 text-white";
+                articleBtn.className = "px-4 py-1.5 rounded-full text-sm font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200";
+                videoPanel.classList.remove('hidden');
+                articlePanel.classList.add('hidden');
+            } else {
+                articleBtn.className = "px-4 py-1.5 rounded-full text-sm font-semibold bg-blue-600 text-white";
+                videoBtn.className = "px-4 py-1.5 rounded-full text-sm font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200";
+                articlePanel.classList.remove('hidden');
+                videoPanel.classList.add('hidden');
+            }
+        };
+
+        function showStatus(message, type = 'info', showWhisperUpload = false) {
+            const banner = document.getElementById('status-banner');
+            const msgEl = document.getElementById('status-message');
+            const whisperWrap = document.getElementById('whisper-upload-wrapper');
+
+            banner.className = "p-4 rounded-xl border text-sm flex flex-wrap items-center justify-between gap-3";
+            if (type === 'error') {
+                banner.classList.add('bg-red-50', 'border-red-200', 'text-red-800');
+            } else
