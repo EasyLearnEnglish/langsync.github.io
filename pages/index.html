@@ -33,6 +33,9 @@
             color: #1d4ed8;
             text-decoration: underline;
         }
+        .subtitle-row {
+            transition: background-color 0.15s ease, border-color 0.15s ease;
+        }
         .subtitle-active {
             background-color: #eff6ff;
             border-left: 4px solid #2563eb;
@@ -68,7 +71,7 @@
 
         <!-- TAB 1: WORKSPACE (Media Loader & Interactive Reader/Player) -->
         <section id="tab-workspace" class="space-y-6">
-            
+
             <!-- Media Import Controls -->
             <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
                 <div class="flex flex-wrap gap-3 mb-4 border-b border-slate-100 pb-3">
@@ -166,10 +169,13 @@
                     <div class="lg:col-span-7 bg-black flex items-center justify-center aspect-video">
                         <div id="youtube-player" class="w-full h-full"></div>
                     </div>
-                    <div class="lg:col-span-5 flex flex-col h-[420px] lg:h-auto max-h-[500px] border-t lg:border-t-0 lg:border-l border-slate-200">
+                    <div class="lg:col-span-5 flex flex-col h-[420px] lg:h-[500px] border-t lg:border-t-0 lg:border-l border-slate-200">
                         <div class="p-3 bg-slate-100 border-b border-slate-200 flex items-center justify-between text-xs text-slate-600">
-                            <span>Click any word to look up or save</span>
-                            <label class="flex items-center gap-1.5 cursor-pointer">
+                            <div class="flex items-center gap-2">
+                                <span>Click cue to seek · Click word to look up</span>
+                                <span id="live-time-readout" class="font-mono bg-white border border-slate-200 px-1.5 py-0.5 rounded text-slate-700">00:00</span>
+                            </div>
+                            <label class="flex items-center gap-1.5 cursor-pointer select-none">
                                 <input type="checkbox" id="auto-scroll-toggle" checked class="rounded text-blue-600">
                                 <span>Auto-scroll</span>
                             </label>
@@ -241,7 +247,7 @@
             <span id="popover-word" class="font-bold text-base text-blue-700 truncate">word</span>
             <button onclick="closePopover()" class="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
         </div>
-        
+
         <div class="space-y-1.5 text-sm">
             <a id="link-wordreference" href="#" target="_blank" rel="noopener noreferrer" class="flex items-center justify-between w-full px-3 py-2 rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 font-medium transition">
                 <span>Open in WordReference</span>
@@ -276,15 +282,20 @@
         // ==========================================
         // CONFIGURATION
         // ==========================================
-        // Replace with your deployed Vercel or Netlify serverless endpoint URL
         const SERVERLESS_API_URL = "https://frolicking-blancmange-92134f.netlify.app/.netlify/functions/transcript";
 
         // ==========================================
         // APPLICATION STATE
         // ==========================================
         let ytPlayer = null;
-        let syncInterval = null;
-        let currentSubtitles = [];
+        let ytApiReady = false;
+        let pendingVideoId = null;
+        let syncRafId = null;
+        let activeSubtitleIndex = -1;
+        let userScrollingSubtitles = false;
+        let scrollResumeTimeout = null;
+
+        let currentSubtitles = []; // [{ index, start, end, text }]
         let currentMedia = null;
         let selectedVocabTerm = "";
         let whisperTranscriber = null;
@@ -292,7 +303,7 @@
         let savedMedia = JSON.parse(localStorage.getItem('lingosync_media') || '[]');
         let vocabList = JSON.parse(localStorage.getItem('lingosync_vocab') || '[]');
 
-        // Initialize UI counts
+        // Initialize UI counts & views
         updateCounters();
         renderSavedMedia();
         renderVocabTable();
@@ -341,4 +352,820 @@
             banner.className = "p-4 rounded-xl border text-sm flex flex-wrap items-center justify-between gap-3";
             if (type === 'error') {
                 banner.classList.add('bg-red-50', 'border-red-200', 'text-red-800');
-            } else
+            } else if (type === 'warning') {
+                banner.classList.add('bg-amber-50', 'border-amber-200', 'text-amber-900');
+            } else if (type === 'success') {
+                banner.classList.add('bg-emerald-50', 'border-emerald-200', 'text-emerald-800');
+            } else {
+                banner.classList.add('bg-blue-50', 'border-blue-200', 'text-blue-800');
+            }
+
+            msgEl.textContent = message;
+            whisperWrap.classList.toggle('hidden', !showWhisperUpload);
+            banner.classList.remove('hidden');
+        }
+
+        function hideStatus() {
+            document.getElementById('status-banner').classList.add('hidden');
+        }
+
+        // ==========================================
+        // YOUTUBE PLAYER & SUBTITLE SYNC ENGINE
+        // ==========================================
+        window.onYouTubeIframeAPIReady = function() {
+            ytApiReady = true;
+            if (pendingVideoId) {
+                mountYouTubePlayer(pendingVideoId);
+                pendingVideoId = null;
+            }
+        };
+
+        function extractYouTubeId(url) {
+            if (!url) return null;
+            const patterns = [
+                /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/,
+                /^([a-zA-Z0-9_-]{11})$/
+            ];
+            for (const re of patterns) {
+                const match = url.trim().match(re);
+                if (match && match[1]) return match[1];
+            }
+            return null;
+        }
+
+        function mountYouTubePlayer(videoId) {
+            stopSubtitleSyncLoop();
+
+            if (!ytApiReady || !window.YT || !window.YT.Player) {
+                pendingVideoId = videoId;
+                return;
+            }
+
+            if (ytPlayer && typeof ytPlayer.loadVideoById === 'function') {
+                ytPlayer.loadVideoById(videoId);
+                startSubtitleSyncLoop();
+                return;
+            }
+
+            ytPlayer = new window.YT.Player('youtube-player', {
+                videoId,
+                playerVars: {
+                    rel: 0,
+                    modestbranding: 1,
+                    playsinline: 1
+                },
+                events: {
+                    onReady: () => {
+                        startSubtitleSyncLoop();
+                    },
+                    onStateChange: (event) => {
+                        const PlayerState = window.YT.PlayerState;
+                        if (event.data === PlayerState.PLAYING) {
+                            startSubtitleSyncLoop();
+                        } else if (event.data === PlayerState.PAUSED || event.data === PlayerState.ENDED) {
+                            // Update one last time at exact pause/end timestamp
+                            updateSubtitleHighlightAtTime(getAccurateVideoTime());
+                        }
+                    }
+                }
+            });
+        }
+
+        function getAccurateVideoTime() {
+            if (!ytPlayer || typeof ytPlayer.getCurrentTime !== 'function') return 0;
+            const t = Number(ytPlayer.getCurrentTime());
+            return Number.isFinite(t) && t >= 0 ? t : 0;
+        }
+
+        function formatTimestamp(seconds) {
+            const totalSec = Math.max(0, Math.floor(Number(seconds) || 0));
+            const hrs = Math.floor(totalSec / 3600);
+            const mins = Math.floor((totalSec % 3600) / 60);
+            const secs = totalSec % 60;
+            if (hrs > 0) {
+                return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+            }
+            return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+        }
+
+        function parseTimeValue(val) {
+            if (typeof val === 'number' && Number.isFinite(val)) return val;
+            if (typeof val === 'string') {
+                const trimmed = val.trim();
+                if (/^\d+(\.\d+)?$/.test(trimmed)) return parseFloat(trimmed);
+                // Supports HH:MM:SS,ms or MM:SS.ms
+                const parts = trimmed.replace(',', '.').split(':').map(Number);
+                if (parts.length === 3 && parts.every(Number.isFinite)) {
+                    return parts[0] * 3600 + parts[1] * 60 + parts[2];
+                }
+                if (parts.length === 2 && parts.every(Number.isFinite)) {
+                    return parts[0] * 60 + parts[1];
+                }
+            }
+            return null;
+        }
+
+        /**
+         * Normalizes subtitle items from various Netlify transcript response shapes
+         * and guarantees accurate start/end timestamps in seconds.
+         */
+        function normalizeSubtitles(rawPayload) {
+            let list = [];
+            if (Array.isArray(rawPayload)) {
+                list = rawPayload;
+            } else if (rawPayload && typeof rawPayload === 'object') {
+                list = rawPayload.subtitles
+                    || rawPayload.transcript
+                    || rawPayload.captions
+                    || rawPayload.segments
+                    || rawPayload.chunks
+                    || rawPayload.data
+                    || [];
+            }
+
+            if (!Array.isArray(list)) return [];
+
+            // Detect if start/duration values look like milliseconds (e.g. > 100000 for early cues)
+            const rawStarts = list
+                .map(item => parseTimeValue(item?.start ?? item?.startTime ?? item?.offset ?? item?.tStartMs ?? item?.time))
+                .filter(v => v !== null);
+
+            const looksLikeMillis = rawStarts.length > 0
+                && rawStarts[0] > 1000
+                && list.every(item => {
+                    const s = parseTimeValue(item?.start ?? item?.startTime ?? item?.offset ?? item?.tStartMs ?? item?.time);
+                    const d = parseTimeValue(item?.duration ?? item?.dur ?? item?.dDurationMs);
+                    return (s === null || s >= 100) && (d === null || d >= 50);
+                });
+
+            const scale = looksLikeMillis ? 0.001 : 1;
+
+            const parsed = list
+                .map((item) => {
+                    const textRaw = item?.text ?? item?.content ?? item?.caption ?? item?.line ?? '';
+                    const text = decodeHtmlEntities(String(textRaw).replace(/\s+/g, ' ')).trim();
+                    if (!text) return null;
+
+                    const rawStart = parseTimeValue(
+                        item?.start ?? item?.startTime ?? item?.offset ?? item?.tStartMs ?? item?.time
+                    );
+                    const start = rawStart !== null ? Math.max(0, rawStart * scale) : null;
+
+                    const rawDur = parseTimeValue(item?.duration ?? item?.dur ?? item?.dDurationMs);
+                    const duration = rawDur !== null ? Math.max(0, rawDur * scale) : null;
+
+                    const rawEnd = parseTimeValue(item?.end ?? item?.endTime);
+                    let end = rawEnd !== null ? Math.max(0, rawEnd * scale) : null;
+
+                    if (start !== null && end === null && duration !== null) {
+                        end = start + duration;
+                    }
+
+                    return { start, end, duration, text };
+                })
+                .filter(item => item && item.start !== null);
+
+            // Sort chronologically by start timestamp
+            parsed.sort((a, b) => a.start - b.start);
+
+            // Fill missing or zero-length end timestamps using next cue start or sensible fallback
+            for (let i = 0; i < parsed.length; i++) {
+                const curr = parsed[i];
+                const next = parsed[i + 1];
+                if (curr.end === null || curr.end <= curr.start) {
+                    if (next && next.start > curr.start) {
+                        curr.end = Math.max(curr.start + 0.5, next.start - 0.05);
+                    } else {
+                        const wordCount = curr.text.split(/\s+/).length;
+                        curr.end = curr.start + Math.max(2.0, Math.min(6.0, wordCount * 0.35));
+                    }
+                }
+                curr.index = i;
+            }
+
+            return parsed;
+        }
+
+        function decodeHtmlEntities(str) {
+            const textarea = document.createElement('textarea');
+            textarea.innerHTML = str;
+            return textarea.value;
+        }
+
+        function renderSubtitles(subtitles) {
+            const box = document.getElementById('subtitle-box');
+            box.innerHTML = '';
+            activeSubtitleIndex = -1;
+
+            if (!subtitles || subtitles.length === 0) {
+                box.innerHTML = `<div class="text-sm text-slate-400 text-center py-8">No synchronized subtitles available for this video.</div>`;
+                return;
+            }
+
+            const fragment = document.createDocumentFragment();
+
+            subtitles.forEach((cue, idx) => {
+                const row = document.createElement('div');
+                row.id = `sub-cue-${idx}`;
+                row.dataset.index = String(idx);
+                row.className = "subtitle-row p-2.5 rounded-lg cursor-pointer hover:bg-slate-100 border-l-4 border-transparent";
+                row.addEventListener('click', (e) => {
+                    // Only seek if user didn't click a word token (which opens the vocab popover)
+                    if (e.target.classList.contains('vocab-token')) return;
+                    if (ytPlayer && typeof ytPlayer.seekTo === 'function') {
+                        ytPlayer.seekTo(cue.start, true);
+                        if (typeof ytPlayer.playVideo === 'function') {
+                            ytPlayer.playVideo();
+                        }
+                        updateSubtitleHighlightAtTime(cue.start);
+                    }
+                });
+
+                const tsBadge = document.createElement('div');
+                tsBadge.className = "text-[11px] font-mono text-slate-400 mb-0.5 select-none";
+                tsBadge.textContent = formatTimestamp(cue.start);
+
+                const textContainer = document.createElement('div');
+                textContainer.className = "text-slate-800";
+                appendTokenizedText(textContainer, cue.text);
+
+                row.appendChild(tsBadge);
+                row.appendChild(textContainer);
+                fragment.appendChild(row);
+            });
+
+            box.appendChild(fragment);
+        }
+
+        /**
+         * Finds the best matching subtitle index for a given playback time in seconds.
+         */
+        function findSubtitleIndexAtTime(timeSec, subs) {
+            if (!subs || subs.length === 0) return -1;
+
+            // 1. Exact active cue match: start <= timeSec <= end
+            // Prefer the most recently started cue if cues slightly overlap
+            let candidate = -1;
+            for (let i = 0; i < subs.length; i++) {
+                if (subs[i].start <= timeSec && timeSec <= subs[i].end) {
+                    candidate = i;
+                } else if (subs[i].start > timeSec) {
+                    break;
+                }
+            }
+            if (candidate !== -1) return candidate;
+
+            // 2. If in a short gap (< 1.5s) after a cue ended, keep previous cue briefly
+            // otherwise find the cue just before timeSec
+            let lastStarted = -1;
+            for (let i = 0; i < subs.length; i++) {
+                if (subs[i].start <= timeSec) {
+                    lastStarted = i;
+                } else {
+                    break;
+                }
+            }
+            if (lastStarted !== -1) {
+                const gapAfterLast = timeSec - subs[lastStarted].end;
+                if (gapAfterLast >= 0 && gapAfterLast <= 1.2) {
+                    return lastStarted;
+                }
+            }
+
+            return -1;
+        }
+
+        function updateSubtitleHighlightAtTime(currentTime) {
+            const readout = document.getElementById('live-time-readout');
+            if (readout) {
+                readout.textContent = formatTimestamp(currentTime);
+            }
+
+            if (!currentSubtitles || currentSubtitles.length === 0) return;
+
+            const nextIndex = findSubtitleIndexAtTime(currentTime, currentSubtitles);
+            if (nextIndex === activeSubtitleIndex) return;
+
+            if (activeSubtitleIndex !== -1) {
+                const prevEl = document.getElementById(`sub-cue-${activeSubtitleIndex}`);
+                if (prevEl) prevEl.classList.remove('subtitle-active');
+            }
+
+            activeSubtitleIndex = nextIndex;
+
+            if (activeSubtitleIndex !== -1) {
+                const activeEl = document.getElementById(`sub-cue-${activeSubtitleIndex}`);
+                if (activeEl) {
+                    activeEl.classList.add('subtitle-active');
+
+                    const autoScroll = document.getElementById('auto-scroll-toggle')?.checked;
+                    if (autoScroll && !userScrollingSubtitles) {
+                        scrollCueIntoViewSmooth(activeEl);
+                    }
+                }
+            }
+        }
+
+        function scrollCueIntoViewSmooth(el) {
+            const box = document.getElementById('subtitle-box');
+            if (!box || !el) return;
+            const targetTop = el.offsetTop - box.offsetTop - (box.clientHeight / 2) + (el.clientHeight / 2);
+            box.scrollTo({
+                top: Math.max(0, targetTop),
+                behavior: 'smooth'
+            });
+        }
+
+        function startSubtitleSyncLoop() {
+            stopSubtitleSyncLoop();
+            const tick = () => {
+                const t = getAccurateVideoTime();
+                updateSubtitleHighlightAtTime(t);
+                syncRafId = requestAnimationFrame(tick);
+            };
+            syncRafId = requestAnimationFrame(tick);
+        }
+
+        function stopSubtitleSyncLoop() {
+            if (syncRafId !== null) {
+                cancelAnimationFrame(syncRafId);
+                syncRafId = null;
+            }
+        }
+
+        // Pause auto-scroll briefly when user manually scrolls the subtitle panel
+        document.getElementById('subtitle-box').addEventListener('wheel', () => {
+            userScrollingSubtitles = true;
+            clearTimeout(scrollResumeTimeout);
+            scrollResumeTimeout = setTimeout(() => {
+                userScrollingSubtitles = false;
+            }, 3500);
+        }, { passive: true });
+
+        // ==========================================
+        // MEDIA LOADING (YOUTUBE + NETLIFY & ARTICLE)
+        // ==========================================
+        window.handleLoadVideo = async function() {
+            const urlInput = document.getElementById('video-url-input').value.trim();
+            const customTitle = document.getElementById('video-title-input').value.trim();
+            const langCode = (document.getElementById('video-lang-input').value.trim() || 'en').toLowerCase();
+
+            const videoId = extractYouTubeId(urlInput);
+            if (!videoId) {
+                showStatus("Please enter a valid YouTube URL or 11-character video ID.", "error");
+                return;
+            }
+
+            showStatus("Fetching subtitles from Netlify transcript service...", "info");
+            openViewer({
+                id: `yt_${videoId}_${Date.now()}`,
+                type: 'video',
+                videoId,
+                url: urlInput,
+                lang: langCode,
+                title: customTitle || `YouTube Video (${videoId})`,
+                subtitles: []
+            });
+
+            mountYouTubePlayer(videoId);
+
+            try {
+                const endpoint = new URL(SERVERLESS_API_URL);
+                endpoint.searchParams.set('videoId', videoId);
+                endpoint.searchParams.set('url', urlInput);
+                endpoint.searchParams.set('lang', langCode);
+
+                const res = await fetch(endpoint.toString(), {
+                    method: 'GET',
+                    headers: { 'Accept': 'application/json' }
+                });
+
+                if (!res.ok) {
+                    throw new Error(`Server returned HTTP ${res.status}`);
+                }
+
+                const data = await res.json();
+                const normalized = normalizeSubtitles(data);
+
+                if (data && data.title && !customTitle) {
+                    currentMedia.title = data.title;
+                    document.getElementById('viewer-title').textContent = currentMedia.title;
+                }
+
+                if (normalized.length > 0) {
+                    currentSubtitles = normalized;
+                    currentMedia.subtitles = normalized;
+                    renderSubtitles(normalized);
+                    updateSubtitleHighlightAtTime(getAccurateVideoTime());
+                    showStatus(`Loaded ${normalized.length} synchronized subtitle cues (${langCode}).`, "success");
+                } else {
+                    currentSubtitles = [];
+                    currentMedia.subtitles = [];
+                    renderSubtitles([]);
+                    showStatus(
+                        "No captions returned for this video/language. You can upload an audio/video file below to transcribe with Whisper AI.",
+                        "warning",
+                        true
+                    );
+                }
+            } catch (err) {
+                console.error("Subtitle fetch error:", err);
+                currentSubtitles = [];
+                renderSubtitles([]);
+                showStatus(
+                    `Could not fetch subtitles via Netlify (${err.message}). Upload a local audio/video file to run Whisper AI in your browser.`,
+                    "warning",
+                    true
+                );
+            }
+        };
+
+        window.handleLoadArticle = function() {
+            stopSubtitleSyncLoop();
+            const title = document.getElementById('article-title-input').value.trim() || "Untitled Article";
+            const sourceUrl = document.getElementById('article-url-input').value.trim();
+            const body = document.getElementById('article-body-input').value.trim();
+
+            if (!body) {
+                showStatus("Please paste some article text before loading.", "error");
+                return;
+            }
+
+            hideStatus();
+            openViewer({
+                id: `art_${Date.now()}`,
+                type: 'article',
+                title,
+                sourceUrl,
+                body
+            });
+        };
+
+        function openViewer(mediaObj) {
+            currentMedia = mediaObj;
+            document.getElementById('viewer-container').classList.remove('hidden');
+            document.getElementById('viewer-title').textContent = mediaObj.title;
+
+            const badge = document.getElementById('viewer-badge');
+            const videoWs = document.getElementById('video-workspace');
+            const articleWs = document.getElementById('article-workspace');
+
+            if (mediaObj.type === 'video') {
+                badge.textContent = "VIDEO";
+                badge.className = "text-xs font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-blue-100 text-blue-800 mr-2";
+                videoWs.classList.remove('hidden');
+                articleWs.classList.add('hidden');
+                currentSubtitles = normalizeSubtitles(mediaObj.subtitles || []);
+                renderSubtitles(currentSubtitles);
+            } else {
+                badge.textContent = "ARTICLE";
+                badge.className = "text-xs font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-purple-100 text-purple-800 mr-2";
+                articleWs.classList.remove('hidden');
+                videoWs.classList.add('hidden');
+                renderArticleContent(mediaObj.body);
+            }
+        }
+
+        function renderArticleContent(text) {
+            const container = document.getElementById('article-reader-content');
+            container.innerHTML = '';
+
+            const paragraphs = text.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
+            paragraphs.forEach(paraText => {
+                const p = document.createElement('p');
+                appendTokenizedText(p, paraText);
+                container.appendChild(p);
+            });
+        }
+
+        // ==========================================
+        // WHISPER AI BROWSER FALLBACK
+        // ==========================================
+        window.handleWhisperFallback = async function(event) {
+            const file = event.target.files?.[0];
+            if (!file) return;
+
+            showStatus(`Transcribing "${file.name}" with Whisper AI (first run downloads model weights)...`, "info");
+
+            try {
+                if (!whisperTranscriber) {
+                    whisperTranscriber = await pipeline(
+                        'automatic-speech-recognition',
+                        'Xenova/whisper-tiny',
+                        { return_timestamps: true }
+                    );
+                }
+
+                const audioUrl = URL.createObjectURL(file);
+                const result = await whisperTranscriber(audioUrl, {
+                    return_timestamps: true,
+                    chunk_length_s: 30,
+                    stride_length_s: 5
+                });
+                URL.revokeObjectURL(audioUrl);
+
+                let cues = [];
+                if (Array.isArray(result?.chunks) && result.chunks.length > 0) {
+                    cues = result.chunks.map((chunk, idx) => {
+                        const start = Array.isArray(chunk.timestamp) ? Number(chunk.timestamp[0] || 0) : 0;
+                        const rawEnd = Array.isArray(chunk.timestamp) ? chunk.timestamp[1] : null;
+                        const end = typeof rawEnd === 'number' ? rawEnd : start + 4;
+                        return { index: idx, start, end, text: (chunk.text || '').trim() };
+                    }).filter(c => c.text);
+                } else if (result?.text) {
+                    cues = [{ index: 0, start: 0, end: 9999, text: result.text.trim() }];
+                }
+
+                currentSubtitles = normalizeSubtitles(cues);
+                if (currentMedia) {
+                    currentMedia.subtitles = currentSubtitles;
+                }
+                renderSubtitles(currentSubtitles);
+                updateSubtitleHighlightAtTime(getAccurateVideoTime());
+                showStatus(`Whisper generated ${currentSubtitles.length} subtitle cues.`, "success");
+            } catch (err) {
+                console.error("Whisper transcription error:", err);
+                showStatus(`Whisper AI failed: ${err.message}`, "error", true);
+            } finally {
+                event.target.value = "";
+            }
+        };
+
+        // ==========================================
+        // INTERACTIVE TOKENS & VOCAB POPOVER
+        // ==========================================
+        function appendTokenizedText(parentEl, text) {
+            // Split into words and whitespace/punctuation while preserving spacing
+            const tokens = text.split(/(\s+)/);
+            tokens.forEach(token => {
+                if (!token) return;
+                if (/^\s+$/.test(token)) {
+                    parentEl.appendChild(document.createTextNode(token));
+                    return;
+                }
+
+                // Separate leading/trailing punctuation so clicked word is clean
+                const match = token.match(/^([^\p{L}\p{N}_'-]*)([\p{L}\p{N}_'-]+)([^\p{L}\p{N}_'-]*)$/u);
+                if (match) {
+                    const [, lead, coreWord, trail] = match;
+                    if (lead) parentEl.appendChild(document.createTextNode(lead));
+
+                    const span = document.createElement('span');
+                    span.className = 'vocab-token';
+                    span.textContent = coreWord;
+                    span.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        openVocabPopover(coreWord, e.clientX, e.clientY);
+                    });
+                    parentEl.appendChild(span);
+
+                    if (trail) parentEl.appendChild(document.createTextNode(trail));
+                } else {
+                    parentEl.appendChild(document.createTextNode(token));
+                }
+            });
+        }
+
+        // Support highlighting phrases with the mouse/selection
+        document.addEventListener('mouseup', (e) => {
+            const popover = document.getElementById('vocab-popover');
+            if (popover.contains(e.target)) return;
+
+            const sel = window.getSelection();
+            const selectedText = sel ? sel.toString().trim() : '';
+            if (selectedText && selectedText.length <= 80 && /\s/.test(selectedText)) {
+                openVocabPopover(selectedText, e.clientX, e.clientY);
+            }
+        });
+
+        function openVocabPopover(term, clientX, clientY) {
+            selectedVocabTerm = term.trim();
+            if (!selectedVocabTerm) return;
+
+            const pair = document.getElementById('target-lang').value || 'enfr';
+            const encoded = encodeURIComponent(selectedVocabTerm);
+
+            document.getElementById('popover-word').textContent = selectedVocabTerm;
+            document.getElementById('popover-definition-input').value = '';
+            document.getElementById('link-wordreference').href = `https://www.wordreference.com/${pair}/${encoded}`;
+            document.getElementById('link-google-search').href = `https://www.google.com/search?q=${encoded}`;
+            document.getElementById('link-google-images').href = `https://www.google.com/search?tbm=isch&q=${encoded}`;
+
+            const popover = document.getElementById('vocab-popover');
+            popover.classList.remove('hidden');
+
+            const popWidth = 288; // w-72
+            const popHeight = 260;
+            const left = Math.min(window.innerWidth - popWidth - 12, Math.max(12, clientX + 8));
+            const top = Math.min(window.innerHeight - popHeight - 12, Math.max(12, clientY + 8));
+
+            popover.style.left = `${left}px`;
+            popover.style.top = `${top}px`;
+        }
+
+        window.closePopover = function() {
+            document.getElementById('vocab-popover').classList.add('hidden');
+        };
+
+        window.saveVocabFromPopover = function() {
+            if (!selectedVocabTerm) return;
+            const def = document.getElementById('popover-definition-input').value.trim();
+
+            const existingIdx = vocabList.findIndex(v => v.term.toLowerCase() === selectedVocabTerm.toLowerCase());
+            if (existingIdx !== -1) {
+                if (def) vocabList[existingIdx].definition = def;
+            } else {
+                vocabList.unshift({
+                    id: `vocab_${Date.now()}`,
+                    term: selectedVocabTerm,
+                    definition: def
+                });
+            }
+
+            localStorage.setItem('lingosync_vocab', JSON.stringify(vocabList));
+            updateCounters();
+            renderVocabTable();
+            closePopover();
+        };
+
+        // ==========================================
+        // SAVED MEDIA LIBRARY
+        // ==========================================
+        window.saveCurrentMedia = function() {
+            if (!currentMedia) return;
+
+            const mediaSnapshot = {
+                ...currentMedia,
+                subtitles: currentMedia.type === 'video' ? currentSubtitles : undefined,
+                savedAt: new Date().toISOString()
+            };
+
+            const existingIndex = savedMedia.findIndex(m => m.id === mediaSnapshot.id);
+            if (existingIndex !== -1) {
+                savedMedia[existingIndex] = mediaSnapshot;
+            } else {
+                savedMedia.unshift(mediaSnapshot);
+            }
+
+            localStorage.setItem('lingosync_media', JSON.stringify(savedMedia));
+            updateCounters();
+            renderSavedMedia();
+            showStatus(`Saved "${mediaSnapshot.title}" to your library.`, "success");
+        };
+
+        window.loadSavedMediaItem = function(id) {
+            const item = savedMedia.find(m => m.id === id);
+            if (!item) return;
+
+            switchTab('workspace');
+            if (item.type === 'video') {
+                setInputMode('video');
+                document.getElementById('video-url-input').value = item.url || '';
+                document.getElementById('video-title-input').value = item.title || '';
+                document.getElementById('video-lang-input').value = item.lang || 'en';
+                openViewer({ ...item });
+                if (item.videoId) {
+                    mountYouTubePlayer(item.videoId);
+                }
+            } else {
+                setInputMode('article');
+                document.getElementById('article-title-input').value = item.title || '';
+                document.getElementById('article-url-input').value = item.sourceUrl || '';
+                document.getElementById('article-body-input').value = item.body || '';
+                openViewer({ ...item });
+            }
+        };
+
+        window.deleteSavedMedia = function(id) {
+            savedMedia = savedMedia.filter(m => m.id !== id);
+            localStorage.setItem('lingosync_media', JSON.stringify(savedMedia));
+            updateCounters();
+            renderSavedMedia();
+        };
+
+        function renderSavedMedia() {
+            const grid = document.getElementById('saved-media-grid');
+            grid.innerHTML = '';
+
+            if (savedMedia.length === 0) {
+                grid.innerHTML = `<div class="col-span-full bg-white p-8 rounded-xl border border-slate-200 text-center text-slate-400 text-sm">No saved videos or articles yet.</div>`;
+                return;
+            }
+
+            savedMedia.forEach(item => {
+                const card = document.createElement('div');
+                card.className = "bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between gap-4";
+
+                const badgeClass = item.type === 'video'
+                    ? "bg-blue-100 text-blue-800"
+                    : "bg-purple-100 text-purple-800";
+
+                const metaText = item.type === 'video'
+                    ? `${(item.subtitles || []).length} subtitle cues · ${(item.lang || 'en').toUpperCase()}`
+                    : `${(item.body || '').split(/\s+/).filter(Boolean).length} words`;
+
+                card.innerHTML = `
+                    <div>
+                        <div class="flex items-center justify-between gap-2 mb-2">
+                            <span class="text-[11px] font-bold uppercase px-2 py-0.5 rounded ${badgeClass}">${item.type}</span>
+                            <button onclick="deleteSavedMedia('${item.id}')" class="text-xs text-slate-400 hover:text-red-600 transition">Delete</button>
+                        </div>
+                        <h3 class="font-bold text-slate-900 line-clamp-2">${escapeHtml(item.title)}</h3>
+                        <p class="text-xs text-slate-500 mt-1">${escapeHtml(metaText)}</p>
+                    </div>
+                    <button onclick="loadSavedMediaItem('${item.id}')" class="w-full py-2 bg-slate-100 hover:bg-blue-600 hover:text-white text-slate-700 text-xs font-semibold rounded-lg transition">
+                        Open in Workspace
+                    </button>
+                `;
+                grid.appendChild(card);
+            });
+        }
+
+        // ==========================================
+        // VOCABULARY TABLE & CSV EXPORT
+        // ==========================================
+        function renderVocabTable() {
+            const tbody = document.getElementById('vocab-table-body');
+            tbody.innerHTML = '';
+
+            if (vocabList.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="3" class="px-6 py-8 text-center text-slate-400">No vocabulary saved yet. Click any word in a video subtitle or article to add it.</td></tr>`;
+                return;
+            }
+
+            vocabList.forEach(entry => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td class="px-6 py-3 font-semibold text-blue-700">${escapeHtml(entry.term)}</td>
+                    <td class="px-6 py-3">
+                        <input type="text" value="${escapeAttr(entry.definition || '')}" placeholder="Add definition..." onchange="updateVocabDefinition('${entry.id}', this.value)" class="w-full px-2.5 py-1 border border-slate-200 rounded text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+                    </td>
+                    <td class="px-6 py-3 text-right">
+                        <button onclick="deleteVocabItem('${entry.id}')" class="text-xs text-red-600 hover:underline">Remove</button>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        window.updateVocabDefinition = function(id, newDef) {
+            const item = vocabList.find(v => v.id === id);
+            if (!item) return;
+            item.definition = newDef.trim();
+            localStorage.setItem('lingosync_vocab', JSON.stringify(vocabList));
+        };
+
+        window.deleteVocabItem = function(id) {
+            vocabList = vocabList.filter(v => v.id !== id);
+            localStorage.setItem('lingosync_vocab', JSON.stringify(vocabList));
+            updateCounters();
+            renderVocabTable();
+        };
+
+        window.clearVocabList = function() {
+            if (!confirm("Clear all saved vocabulary items?")) return;
+            vocabList = [];
+            localStorage.setItem('lingosync_vocab', JSON.stringify(vocabList));
+            updateCounters();
+            renderVocabTable();
+        };
+
+        window.exportVocabCSV = function() {
+            if (vocabList.length === 0) return;
+
+            const escapeCsv = (val) => `"${String(val || '').replace(/"/g, '""')}"`;
+            const rows = [
+                ["Vocab", "WordReference Definition"].map(escapeCsv).join(","),
+                ...vocabList.map(item => [item.term, item.definition || ""].map(escapeCsv).join(","))
+            ];
+
+            const blob = new Blob(["\uFEFF" + rows.join("\n")], { type: "text/csv;charset=utf-8;" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `lingosync-vocab-${new Date().toISOString().slice(0, 10)}.csv`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        };
+
+        function updateCounters() {
+            document.getElementById('saved-count').textContent = String(savedMedia.length);
+            document.getElementById('vocab-count').textContent = String(vocabList.length);
+        }
+
+        function escapeHtml(str) {
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        function escapeAttr(str) {
+            return String(str).replace(/"/g, '&quot;');
+        }
+    </script>
+</body>
+</html>
