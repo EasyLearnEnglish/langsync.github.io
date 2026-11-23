@@ -597,6 +597,207 @@
             box.appendChild(fragment);
         }
 
+// ==========================================
+// REAL SUBTITLE PARSER & LIVE SYNC PATCH
+// ==========================================
+(function installRealSubtitleLoader() {
+    const CUE_ARRAY_KEYS = [
+        'subtitles', 'transcript', 'captions', 'segments',
+        'chunks', 'cues', 'lines', 'items', 'entries', 'events'
+    ];
+    const WRAPPER_KEYS = ['data', 'result', 'payload', 'body', 'response', 'track'];
+
+    function parseSeconds(val) {
+        if (typeof val === 'number' && Number.isFinite(val)) return val;
+        if (typeof val === 'string') {
+            const s = val.trim();
+            if (!s) return null;
+            if (/^-?\d+(\.\d+)?$/.test(s)) return parseFloat(s);
+            // Matches HH:MM:SS,mmm or MM:SS.mmm
+            const parts = s.replace(',', '.').split(':').map(Number);
+            if (parts.length === 3 && parts.every(Number.isFinite)) {
+                return parts[0] * 3600 + parts[1] * 60 + parts[2];
+            }
+            if (parts.length === 2 && parts.every(Number.isFinite)) {
+                return parts[0] * 60 + parts[1];
+            }
+        }
+        return null;
+    }
+
+    function decodeEntities(raw) {
+        const el = document.createElement('textarea');
+        el.innerHTML = String(raw || '');
+        return el.value.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+
+    // Parses SRT or WebVTT strings if the Netlify function returns raw subtitle text
+    function parseSrtOrVtt(text) {
+        const blocks = String(text || '')
+            .replace(/\r\n/g, '\n')
+            .replace(/^WEBVTT[^\n]*\n+/i, '')
+            .split(/\n\s*\n/);
+
+        const cues = [];
+        for (const block of blocks) {
+            const lines = block.split('\n').map(l => l.trim()).filter(Boolean);
+            if (!lines.length) continue;
+
+            const timeLineIdx = lines.findIndex(l => l.includes('-->'));
+            if (timeLineIdx === -1) continue;
+
+            const [rawStart, rawEndPart] = lines[timeLineIdx].split('-->');
+            const rawEnd = (rawEndPart || '').trim().split(/\s+/)[0];
+            const start = parseSeconds(rawStart);
+            const end = parseSeconds(rawEnd);
+            const cueText = decodeEntities(lines.slice(timeLineIdx + 1).join(' '));
+
+            if (start !== null && cueText) {
+                cues.push({
+                    start,
+                    end: end !== null && end > start ? end : start + 3,
+                    text: cueText
+                });
+            }
+        }
+        return cues;
+    }
+
+    // Recursively locates a subtitle array or transcript string inside nested JSON responses
+    function extractCueSource(payload, depth = 0) {
+        if (!payload || depth > 5) return [];
+
+        if (typeof payload === 'string') {
+            const trimmed = payload.trim();
+            if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+                try {
+                    return extractCueSource(JSON.parse(trimmed), depth + 1);
+                } catch (_) {
+                    // Not JSON; try SRT/VTT parser below
+                }
+            }
+            if (trimmed.includes('-->')) {
+                return parseSrtOrVtt(trimmed);
+            }
+            return [];
+        }
+
+        if (Array.isArray(payload)) {
+            return payload;
+        }
+
+        if (typeof payload === 'object') {
+            for (const key of CUE_ARRAY_KEYS) {
+                if (Array.isArray(payload[key]) && payload[key].length > 0) {
+                    return payload[key];
+                }
+                if (typeof payload[key] === 'string' && payload[key].trim()) {
+                    const parsed = extractCueSource(payload[key], depth + 1);
+                    if (parsed.length > 0) return parsed;
+                }
+            }
+            for (const wKey of WRAPPER_KEYS) {
+                if (payload[wKey] !== undefined && payload[wKey] !== null) {
+                    const nested = extractCueSource(payload[wKey], depth + 1);
+                    if (nested.length > 0) return nested;
+                }
+            }
+        }
+
+        return [];
+    }
+
+    const baseNormalize = typeof window.normalizeSubtitles === 'function'
+        ? window.normalizeSubtitles
+        : null;
+
+    window.normalizeSubtitles = function patchedNormalizeSubtitles(rawPayload) {
+        const extracted = extractCueSource(rawPayload);
+        const sourceList = extracted.length > 0 ? extracted : rawPayload;
+
+        // If a single cue matches the known placeholder string, treat it as empty so real cues win
+        const filtered = Array.isArray(sourceList)
+            ? sourceList.filter(item => {
+                const txt = String(item?.text ?? item?.content ?? item?.caption ?? '').trim();
+                return txt !== 'Automated subtitle timestamp generated for imported video.'
+                    && txt !== 'Click any word to view definitions on WordReference.';
+            })
+            : sourceList;
+
+        const result = baseNormalize ? baseNormalize(filtered) : [];
+        if (Array.isArray(result) && result.length > 0) {
+            return result.map((cue, idx) => ({ ...cue, index: idx }));
+        }
+
+        if (!Array.isArray(filtered)) return [];
+
+        const normalized = filtered
+            .map((item) => {
+                const text = decodeEntities(item?.text ?? item?.content ?? item?.caption ?? item?.line ?? '');
+                const start = parseSeconds(
+                    item?.start ?? item?.startTime ?? item?.offset ?? item?.tStartMs ?? item?.time
+                );
+                if (!text || start === null) return null;
+
+                const dur = parseSeconds(item?.duration ?? item?.dur ?? item?.dDurationMs);
+                const rawEnd = parseSeconds(item?.end ?? item?.endTime);
+                const end = rawEnd !== null
+                    ? rawEnd
+                    : (dur !== null ? start + dur : null);
+
+                return { start: Math.max(0, start), end, text };
+            })
+            .filter(Boolean)
+            .sort((a, b) => a.start - b.start);
+
+        for (let i = 0; i < normalized.length; i++) {
+            const curr = normalized[i];
+            const next = normalized[i + 1];
+            if (curr.end === null || curr.end <= curr.start) {
+                curr.end = next && next.start > curr.start
+                    ? Math.max(curr.start + 0.5, next.start - 0.05)
+                    : curr.start + Math.max(2.0, curr.text.split(/\s+/).length * 0.35);
+            }
+            curr.index = i;
+        }
+
+        return normalized;
+    };
+
+    // Ensure every subtitle token remains clickable for WordReference & Vocab List
+    const baseRenderSubtitles = typeof window.renderSubtitles === 'function'
+        ? window.renderSubtitles
+        : null;
+
+    if (baseRenderSubtitles) {
+        window.renderSubtitles = function patchedRenderSubtitles(subtitles) {
+            const cleanSubs = Array.isArray(subtitles)
+                ? subtitles.filter(c => {
+                    const t = String(c?.text || '').trim();
+                    return t !== 'Automated subtitle timestamp generated for imported video.'
+                        && t !== 'Click any word to view definitions on WordReference.';
+                })
+                : [];
+            return baseRenderSubtitles(cleanSubs);
+        };
+    }
+
+    // Keep live video timestamp tracking active even if player loads slightly after fetch
+    const subtitleBox = document.getElementById('subtitle-box');
+    if (subtitleBox && !subtitleBox.dataset.syncGuardAttached) {
+        subtitleBox.dataset.syncGuardAttached = 'true';
+        setInterval(() => {
+            const player = window.ytPlayer;
+            if (player && typeof player.getCurrentTime === 'function' && typeof player.getPlayerState === 'function') {
+                // YT.PlayerState.PLAYING === 1
+                if (player.getPlayerState() === 1 && typeof window.updateSubtitleHighlightAtTime === 'function') {
+                    window.updateSubtitleHighlightAtTime(player.getCurrentTime());
+                }
+            }
+        }, 250);
+    }
+})();
+        
         /**
          * Finds the best matching subtitle index for a given playback time in seconds.
          */
